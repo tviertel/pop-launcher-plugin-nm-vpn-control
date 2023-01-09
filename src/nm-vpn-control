@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+
+import json
+import sys
+import nmcli
+
+nmcli.disable_use_sudo()
+nmcli.set_lang("C.UTF-8")
+
+
+def nmcli_is_activated(uuid):
+    connection_details = nmcli.connection.show(uuid)
+    return connection_details.get("GENERAL.STATE", False) == "activated"
+
+
+def nmcli_toggle(uuid):
+    if not nmcli_is_activated(uuid):
+        nmcli.connection.up(uuid)
+    else:
+        nmcli.connection.down(uuid)
+
+
+# PluginResponse
+class PluginResponse(object):
+    def search_result(self, idx: int, name: str, description: str, icon=None):
+        icon = {"Name": icon} if icon else None
+        sys.stdout.write(json.dumps({
+            "Append": {
+                "id": idx,
+                "name": name,
+                "description": description,
+                "keywords": None,
+                "icon": icon,
+                "exec": None,
+                "window": None
+            }
+        }) + "\n")
+        return self
+
+    def clear(self):
+        sys.stdout.write("\"Clear\"\n")
+        return self
+
+    def close(self):
+        sys.stdout.write("\"Close\"\n")
+        return self
+
+    def finish(self):
+        sys.stdout.write("\"Finished\"\n")
+        return self
+
+    def flush(self):
+        sys.stdout.flush()
+        return self
+
+
+# App
+class App(object):
+    def __init__(self):
+        self.connections = {}
+        self.response = PluginResponse()
+
+    @staticmethod
+    def connection_is_active(conn):
+        return conn.device and len(conn.device) > 2 and conn.device != "--"
+
+    def activate(self, index):
+        if not self.connections or index not in self.connections:
+            return
+
+        self.response.clear().flush()
+
+        connection = self.connections[index]
+
+        if self.connection_is_active(connection):
+            description = "Disconnecting from VPN..."
+        else:
+            description = "Connecting to VPN..."
+
+        self.response \
+            .search_result(index, connection.name, description, "network-vpn-acquiring-symbolic") \
+            .finish() \
+            .flush()
+
+        try:
+            nmcli_toggle(connection.uuid)
+            self.response.close().flush()
+        except Exception as e:
+            self.response.close().flush()
+            self.response \
+                .search_result(index, connection.name, f"Error: {str(e)}", "network-vpn-error-symbolic") \
+                .finish() \
+                .flush()
+
+    def search(self, query):
+        # Get search term from query
+        (keyword, _, search_term) = query.partition(" ")
+
+        # Reset connections (UUIDs)
+        self.connections = {}
+
+        # Get VPN connections and filter by search term
+        connections = [
+            x for x in nmcli.connection()
+            if x.conn_type == "vpn" and search_term.lower() in x.name.lower()
+        ]
+
+        for index, connection in enumerate(connections):
+            self.connections[index] = connection
+            (verb, icon) = ("Connect to", "network-vpn-disconnected-symbolic")
+
+            if self.connection_is_active(connection):
+                (verb, icon) = ("Disconnect from", "network-vpn-symbolic")
+
+            self.response.search_result(index, connection.name, f"{verb} VPN '{connection.name}'", icon)
+
+        self.response.finish().flush()
+
+
+# Main Execution
+def main():
+    app = App()
+
+    for line in sys.stdin:
+        try:
+            request = json.loads(line)
+            if "Search" in request:
+                app.search(request["Search"])
+            elif "Activate" in request:
+                app.activate(request["Activate"])
+        except json.decoder.JSONDecodeError:
+            pass
+
+
+if __name__ == "__main__":
+    main()
